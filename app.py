@@ -8,117 +8,100 @@ import os
 app = Flask(__name__)
 
 # --- Modell laden ---
-print("Starte Server & lade Modell...")
+print("Starte Server...")
 try:
-    # Hier der korrekte Dateiname mit Unterstrich!
-    model = load_model('digit_model.h5')
-    print("Modell erfolgreich geladen!")
+    # Versuche das Modell zu laden (Dateiname mit Unterstrich beachten!)
+    model_path = 'digit_model.h5'
+    if os.path.exists(model_path):
+        model = load_model(model_path)
+        print("Modell erfolgreich geladen!")
+    else:
+        print(f"WARNUNG: {model_path} nicht gefunden! (Prüfe Dateinamen auf GitHub)")
+        model = None
 except Exception as e:
-    print(f"WARNUNG: Modell-Fehler: {e}")
+    print(f"WARNUNG: Kritischer Fehler beim Laden des Modells: {e}")
     model = None
-
-def preProcess(img):
-    imgGray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    imgBlur = cv2.GaussianBlur(imgGray, (5, 5), 1)
-    imgThreshold = cv2.adaptiveThreshold(imgBlur, 255, 1, 1, 11, 2)
-    return imgThreshold
-
-def splitBoxes(img):
-    rows = np.vsplit(img, 9)
-    boxes = []
-    for r in rows:
-        cols = np.hsplit(r, 9)
-        for box in cols:
-            h, w = box.shape
-            crop = box[4:h-4, 4:w-4]
-            crop = cv2.resize(crop, (28, 28))
-            boxes.append(crop)
-    return boxes
-
-def getPredection(boxes, model):
-    result = []
-    if model is None: return [0]*81 # Fallback
-    
-    boxes_array = np.array(boxes)
-    boxes_array = boxes_array.reshape(boxes_array.shape[0], 28, 28, 1)
-    boxes_array = boxes_array / 255.0
-    
-    # Vorhersage
-    predictions = model.predict(boxes_array)
-    
-    for i in range(81):
-        prob = np.amax(predictions[i])
-        classIndex = np.argmax(predictions[i])
-        if prob > 0.6: # Etwas toleranter
-            result.append(int(classIndex))
-        else:
-            result.append(0)
-    return result
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Sudoku AI Ready (Light Version)"
+    return "Sudoku AI Turbo-Mode (Ready)"
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
+    # Fallback, falls Modell fehlt
+    if not model: 
+        print("Anfrage erhalten, aber kein Modell geladen.")
+        return jsonify({'grid': [0]*81, 'status': 'error_no_model'})
+    
     try:
         if 'file' not in request.files: return jsonify({'error': 'No file'}), 400
         
+        # 1. Bild aus dem Request lesen
         file = request.files['file']
         in_memory_file = io.BytesIO(file.read())
         file_bytes = np.frombuffer(in_memory_file.read(), np.uint8)
         img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        # 1. Bild verarbeiten
+        # 2. ZUSCHNEIDEN (Der "LEGO-Filter")
+        # Wir gehen davon aus, dass das Bild VGA (640x480) ist.
+        # Wir schneiden die bunten Ränder weg, um nur das Gitter zu behalten.
+        h, w, _ = img.shape
+        
+        # Werte für VGA (640x480)
+        crop_x = 120  # Links & Rechts je 120px weg (bleiben 400px Breite)
+        crop_y = 60   # Oben & Unten je 60px weg (bleiben 360px Höhe)
+        
+        # Sicherheitscheck, falls Bild kleiner ist
+        if h > 2*crop_y and w > 2*crop_x:
+            img = img[crop_y:h-crop_y, crop_x:w-crop_x]
+        
+        # 3. AUFBEREITUNG
+        # Jetzt skalieren wir den Ausschnitt auf unser Standard-Format
         img = cv2.resize(img, (450, 450))
         
-        # 2. Wir nehmen an, das Bild vom ESP32 ist schon grob zugeschnitten 
-        # oder wir nutzen das ganze Bild, da wir die Konturen sparen wollen für Speed.
-        # (Für beste Ergebnisse: Kamera nah ranhalten!)
+        imgGray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Adaptiver Threshold macht aus grauem Papier hartes Schwarz-Weiß
+        imgThresh = cv2.adaptiveThreshold(imgGray, 255, 1, 1, 11, 2)
         
-        imgThreshold = preProcess(img)
+        # 4. ZERSCHNEIDEN & ERKENNEN
+        grid = []
+        rows = np.vsplit(imgThresh, 9)
         
-        # Versuchen Konturen zu finden (Sudoku ausschneiden)
-        contours, _ = cv2.findContours(imgThreshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        biggest = np.array([])
-        max_area = 0
+        # Wir sammeln alle 81 Kästchen in einem Stapel für die KI
+        batch_images = []
         
-        for i in contours:
-            area = cv2.contourArea(i)
-            if area > 50:
-                peri = cv2.arcLength(i, True)
-                approx = cv2.approxPolyDP(i, 0.02 * peri, True)
-                if area > max_area and len(approx) == 4:
-                    biggest = approx
-                    max_area = area
+        for r in rows:
+            cols = np.hsplit(r, 9)
+            for box in cols:
+                h_box, w_box = box.shape
+                # Rand vom Kästchen entfernen (Gitterlinien wegmachen)
+                # 4 Pixel Rand weg ist ein guter Standardwert
+                crop = box[4:h_box-4, 4:w_box-4]
+                
+                # Auf 28x28 skalieren (Input-Größe für das KI-Modell)
+                crop = cv2.resize(crop, (28, 28))
+                
+                # Normieren (0..1) und richtige Form (28,28,1)
+                crop = crop / 255.0
+                crop = crop.reshape(28, 28, 1)
+                batch_images.append(crop)
+        
+        # KI Vorhersage für alle 81 Bilder auf einmal (schneller!)
+        batch_array = np.array(batch_images)
+        predictions = model.predict(batch_array, verbose=0)
+        
+        # Ergebnisse auswerten
+        for i in range(81):
+            prob = np.amax(predictions[i])     # Wie sicher ist die KI?
+            classIndex = np.argmax(predictions[i]) # Welche Zahl ist es?
+            
+            # Schwellenwert: Nur wenn > 70% sicher, sonst ist es leer (0)
+            if prob > 0.7:
+                grid.append(int(classIndex))
+            else:
+                grid.append(0)
 
-        if biggest.size != 0:
-            # Wenn Gitter gefunden -> Entzerren
-            def reorder(myPoints):
-                myPoints = myPoints.reshape((4, 2))
-                myPointsNew = np.zeros((4, 1, 2), dtype=np.int32)
-                add = myPoints.sum(1)
-                myPointsNew[0] = myPoints[np.argmin(add)]
-                myPointsNew[3] = myPoints[np.argmax(add)]
-                diff = np.diff(myPoints, axis=1)
-                myPointsNew[1] = myPoints[np.argmin(diff)]
-                myPointsNew[2] = myPoints[np.argmax(diff)]
-                return myPointsNew
-
-            biggest = reorder(biggest)
-            pts1 = np.float32(biggest)
-            pts2 = np.float32([[0, 0],[450, 0],[0, 450],[450, 450]])
-            matrix = cv2.getPerspectiveTransform(pts1, pts2)
-            imgWarp = cv2.warpPerspective(img, matrix, (450, 450))
-            imgProcessed = preProcess(imgWarp) # Nochmal Threshold auf das entzerrte
-        else:
-            # Fallback: Kein Gitter gefunden? Nimm das ganze Bild!
-            imgProcessed = imgThreshold
-
-        # 3. Ziffern erkennen (Nur 1x Durchlauf!)
-        boxes = splitBoxes(imgProcessed)
-        grid = getPredection(boxes, model)
-
+        print("Analyse fertig. Grid erkannt.")
         return jsonify({'status': 'success', 'grid': grid})
 
     except Exception as e:
@@ -126,4 +109,6 @@ def analyze():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    # Wichtig für Render: Port aus Umgebungsvariable oder 10000
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
