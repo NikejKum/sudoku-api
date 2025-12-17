@@ -88,34 +88,43 @@ def analyze():
         grid = []
         cell_size = 50
         
+                # ... (Loop startet hier)
         for row in range(9):
             for col in range(9):
                 y1, y2 = row * cell_size, (row + 1) * cell_size
                 x1, x2 = col * cell_size, (col + 1) * cell_size
                 
-                # 1. Rand großzügig entfernen
-                cell_inner = cell[10:-10, 10:-10]
+                # ZUERST 'cell' definieren!
+                cell = thresh[y1:y2, x1:x2]
                 
-                # 2. Pixel zählen im BESCHNITTENEN Bild (cell_inner)
+                # JETZT können wir cell verwenden
+                # Ränder großzügig entfernen (10px)
+                # Sicherstellen, dass die Zelle groß genug ist
+                if cell.shape[0] > 20 and cell.shape[1] > 20:
+                    cell_inner = cell[10:-10, 10:-10]
+                else:
+                    cell_inner = cell # Fallback, falls Zelle winzig
+                
+                # Prüfen
                 white_pixels = cv2.countNonZero(cell_inner)
-                total_pixels = cell_inner.size # Größe von cell_inner nehmen!
+                total_pixels = cell_inner.size
                 
-                # 3. Prüfen (12% Schwelle)
-                if white_pixels < (total_pixels * 0.12): 
+                if total_pixels == 0 or white_pixels < (total_pixels * 0.12):
                     grid.append(0)
                 else:
-                    # Erkennen (auch hier cell_inner nutzen!)
+                    # Erkennen
                     pts = cv2.findNonZero(cell_inner)
                     if pts is not None:
                         x, y, w, h = cv2.boundingRect(pts)
-                        digit = cell_inner[y:y+h, x:x+w]
-                        digit = cv2.resize(digit, (20, 20))
+                        digit_crop = cell_inner[y:y+h, x:x+w]
+                        digit_ready = cv2.resize(digit_crop, (20, 20))
                         
-                        sample = digit.flatten().reshape(1, -1).astype(np.float32)
+                        sample = digit_ready.flatten().reshape(1, -1).astype(np.float32)
                         ret, results, _, _ = knn.findNearest(sample, k=1)
                         grid.append(int(results[0][0]))
                     else:
                         grid.append(0)
+
 
         return jsonify({'status': 'success', 'grid': grid})
 
@@ -125,4 +134,5 @@ def analyze():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
 
