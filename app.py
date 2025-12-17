@@ -93,19 +93,22 @@ def analyze():
                 y1, y2 = row * cell_size, (row + 1) * cell_size
                 x1, x2 = col * cell_size, (col + 1) * cell_size
                 
-                # Rand weg (8px, da Gitter oft dick ist)
-                cell = thresh[y1+8:y2-8, x1+8:x2-8]
+                # 1. Rand großzügig entfernen
+                cell_inner = cell[10:-10, 10:-10]
                 
-                white_pixels = cv2.countNonZero(cell)
-                if white_pixels < (cell.size * 0.08): # 8% Füllung nötig
+                # 2. Pixel zählen im BESCHNITTENEN Bild (cell_inner)
+                white_pixels = cv2.countNonZero(cell_inner)
+                total_pixels = cell_inner.size # Größe von cell_inner nehmen!
+                
+                # 3. Prüfen (12% Schwelle)
+                if white_pixels < (total_pixels * 0.12): 
                     grid.append(0)
                 else:
-                    # Ziffer erkennen
-                    pts = cv2.findNonZero(cell)
+                    # Erkennen (auch hier cell_inner nutzen!)
+                    pts = cv2.findNonZero(cell_inner)
                     if pts is not None:
                         x, y, w, h = cv2.boundingRect(pts)
-                        # Nur den Teil mit Tinte nehmen
-                        digit = cell[y:y+h, x:x+w]
+                        digit = cell_inner[y:y+h, x:x+w]
                         digit = cv2.resize(digit, (20, 20))
                         
                         sample = digit.flatten().reshape(1, -1).astype(np.float32)
@@ -122,3 +125,4 @@ def analyze():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
