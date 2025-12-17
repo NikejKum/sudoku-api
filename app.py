@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 # --- Modell laden (nur 1x beim Start) ---
 try:
-    model = load_model('model.h5')
+    model = load_model('digit_model.h5')
     print("Modell erfolgreich geladen")
 except:
     print("FEHLER: model.h5 nicht gefunden!")
@@ -162,3 +162,4 @@ def analyze():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
+
