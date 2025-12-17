@@ -1,0 +1,7 @@
+flask
+gunicorn
+opencv-python-headless
+numpy
+tensorflow-cpu
+keras
+pillow
