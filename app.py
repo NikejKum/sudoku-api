@@ -3,129 +3,172 @@ import numpy as np
 from flask import Flask, request, jsonify
 import io
 import os
+import urllib.request
 
 app = Flask(__name__)
 
-# --- REPARIERTES KNN ---
-def train_knn_model():
-    """
-    Trainiert KNN mit OpenCV-kompatibler Formatierung.
-    """
+# --- 1. INTELLIGENTES MODELL LADEN ---
+knn = None
+
+def load_smart_knn():
+    global knn
+    print("Lade intelligentes KNN-Modell...")
+    
+    # Wir laden einen kleinen Datensatz mit echten Ziffern (MNIST-ähnlich)
+    # Da wir keine Datei haben, generieren wir ein besseres Set on-the-fly, 
+    # aber diesmal mit Verzerrungen, um echte Kamera-Bilder zu simulieren.
+    
     samples = []
     labels = []
     
-    fonts = [
-        (cv2.FONT_HERSHEY_SIMPLEX, 2.0, 3),
-        (cv2.FONT_HERSHEY_DUPLEX, 2.0, 2),
-        (cv2.FONT_HERSHEY_PLAIN, 3.0, 3),
-    ]
+    # Mehr Schriftarten, mehr Variationen
+    fonts = [cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_PLAIN, cv2.FONT_HERSHEY_DUPLEX, cv2.FONT_HERSHEY_COMPLEX]
     
-    print("✓ Trainiere optimiertes KNN-Modell...")
-    
-    for num in range(1, 10):
-        for font, scale, thickness in fonts:
-            for offset_x in [-5, 0, 5]:
-                for offset_y in [-5, 0, 5]:
+    for digit in range(1, 10):
+        for font in fonts:
+            for scale in [1.0, 1.5, 2.0, 2.5]:
+                for thickness in [1, 2, 3, 4]:
+                    # Basis-Bild
                     img = np.zeros((50, 50), np.uint8)
-                    cv2.putText(img, str(num), (12+offset_x, 38+offset_y), 
-                               font, scale, (255), thickness)
                     
-                    img = cv2.resize(img, (28, 28))
-                    img = img.astype(np.float32) / 255.0
-                    sample = img.flatten()  # Flach machen
+                    # Text zentrieren (ungefähr)
+                    text_size = cv2.getTextSize(str(digit), font, scale, thickness)[0]
+                    text_x = (50 - text_size[0]) // 2
+                    text_y = (50 + text_size[1]) // 2
                     
-                    samples.append(sample)
-                    labels.append(num)  # Nur die Zahl, kein float!
-    
-    # WICHTIG: Korrekte Formatierung für OpenCV KNN
-    samples_array = np.array(samples, dtype=np.float32)
-    labels_array = np.array(labels, dtype=np.int32)  # INT statt FLOAT!
+                    cv2.putText(img, str(digit), (text_x, text_y), font, scale, 255, thickness)
+                    
+                    # WICHTIG: Random Noise & Rotation simulieren (Robustheit!)
+                    # Das macht das Modell schlau gegen schlechte Kameras
+                    center = (25, 25)
+                    for angle in [-10, 0, 10]:
+                        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                        rotated = cv2.warpAffine(img, M, (50, 50))
+                        
+                        # Resize auf 20x20 (Standard für schnelle OCR)
+                        small = cv2.resize(rotated, (20, 20))
+                        
+                        samples.append(small.flatten())
+                        labels.append(digit)
+
+    samples = np.array(samples, dtype=np.float32)
+    labels = np.array(labels, dtype=np.int32)
     
     knn = cv2.ml.KNearest_create()
-    knn.train(samples_array, cv2.ml.ROW_SAMPLE, labels_array)
+    knn.train(samples, cv2.ml.ROW_SAMPLE, labels)
+    print(f"✓ Smart-KNN trainiert mit {len(samples)} Varianten.")
+
+# --- 2. BILDVERARBEITUNGS-FUNKTIONEN ---
+
+def preProcess(img):
+    imgGray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    imgBlur = cv2.GaussianBlur(imgGray, (5, 5), 1)
+    # Adaptive Threshold ist der Schlüssel für Sudokus
+    imgThresh = cv2.adaptiveThreshold(imgBlur, 255, 1, 1, 11, 2)
+    return imgThresh
+
+def find_sudoku_contour(img):
+    # Alles schwarz-weiß machen
+    thresh = preProcess(img)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    print(f"✓ KNN bereit! {len(samples)} Trainingssamples geladen.")
-    return knn
+    biggest = np.array([])
+    max_area = 0
+    
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > 2000: # Muss groß genug sein
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            if area > max_area and len(approx) == 4:
+                biggest = approx
+                max_area = area
+    return biggest
 
-try:
-    knn_model = train_knn_model()
-except Exception as e:
-    print(f"ERROR beim KNN-Training: {e}")
-    knn_model = None
+def reorder_points(myPoints):
+    myPoints = myPoints.reshape((4, 2))
+    myPointsNew = np.zeros((4, 1, 2), dtype=np.int32)
+    add = myPoints.sum(1)
+    myPointsNew[0] = myPoints[np.argmin(add)]
+    myPointsNew[3] = myPoints[np.argmax(add)]
+    diff = np.diff(myPoints, axis=1)
+    myPointsNew[1] = myPoints[np.argmin(diff)]
+    myPointsNew[2] = myPoints[np.argmax(diff)]
+    return myPointsNew
 
-@app.route('/', methods=['GET'])
-def home():
-    return "Sudoku AI (KNN Fixed v3)"
+# --- 3. SERVER LOGIK ---
+
+load_smart_knn()
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
-        if 'file' not in request.files: 
-            return jsonify({'error': 'No file'}), 400
+        if 'file' not in request.files: return jsonify({'error': 'no file'}), 400
         
-        if knn_model is None:
-            return jsonify({'error': 'KNN not loaded'}), 500
-        
-        # 1. BILD LESEN
         file = request.files['file']
-        in_memory_file = io.BytesIO(file.read())
-        file_bytes = np.frombuffer(in_memory_file.read(), np.uint8)
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        img_bytes = np.frombuffer(io.BytesIO(file.read()).read(), np.uint8)
+        img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
         
-        if img is None:
-            return jsonify({'error': 'Invalid image'}), 400
-
-        # 2. ZUSCHNEIDEN
-        h, w, _ = img.shape
-        crop_h = int(h * 0.20)
-        crop_w = int(w * 0.20)
+        # 1. Bild verkleinern (Speed)
+        img = cv2.resize(img, (640, 480)) # Standard VGA Größe nutzen
         
-        if h > 2*crop_h and w > 2*crop_w:
-            img = img[crop_h:h-crop_h, crop_w:w-crop_w]
-            
-        # 3. AUFBEREITUNG
-        img = cv2.resize(img, (450, 450))
-        imgGray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        imgThresh = cv2.adaptiveThreshold(imgGray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                         cv2.THRESH_BINARY_INV, 11, 2)
+        # 2. Sudoku suchen (Kontur)
+        contour = find_sudoku_contour(img)
+        
+        if contour.size != 0:
+            # GEFUNDEN! -> Entzerren (Warp)
+            contour = reorder_points(contour)
+            pts1 = np.float32(contour)
+            pts2 = np.float32([[0, 0], [450, 0], [0, 450], [450, 450]])
+            matrix = cv2.getPerspectiveTransform(pts1, pts2)
+            imgWarp = cv2.warpPerspective(img, matrix, (450, 450))
+            imgDisplay = imgWarp.copy() # Zum Arbeiten
+        else:
+            # NICHT GEFUNDEN -> Fallback (Mitte ausschneiden)
+            h, w = img.shape[:2]
+            crop = int(h*0.1) # 10% Rand weg
+            imgWarp = img[crop:h-crop, crop:w-crop]
+            imgWarp = cv2.resize(imgWarp, (450, 450))
+            imgDisplay = imgWarp.copy()
 
-        # 4. ERKENNEN
+        # 3. Bild für OCR vorbereiten
+        imgWarpGray = cv2.cvtColor(imgWarp, cv2.COLOR_BGR2GRAY)
+        imgWarpThresh = cv2.adaptiveThreshold(imgWarpGray, 255, 1, 1, 11, 2)
+        
+        # 4. Gitter zerlegen & Erkennen
         grid = []
-        rows = np.vsplit(imgThresh, 9)
+        rows = np.vsplit(imgWarpThresh, 9)
         
         for r in rows:
             cols = np.hsplit(r, 9)
             for box in cols:
+                # Rand entfernen (Gitterlinien weg!)
                 h_b, w_b = box.shape
+                # Wir schneiden 6 Pixel Rand weg. Bei 50x50 Boxen bleibt 38x38
                 crop = box[6:h_b-6, 6:w_b-6]
                 
-                # Leer-Check
-                total_pixels = crop.size
+                # Prüfen ob leer
                 white_pixels = cv2.countNonZero(crop)
-                fill_ratio = white_pixels / total_pixels if total_pixels > 0 else 0
+                total_pixels = crop.size
                 
-                if fill_ratio < 0.03:
+                # Wenn weniger als 10% gefüllt -> Leer
+                if white_pixels < (total_pixels * 0.1):
                     grid.append(0)
-                    continue
-                
-                # KNN-Vorhersage
-                tiny_img = cv2.resize(crop, (28, 28))
-                tiny_img = tiny_img.astype(np.float32) / 255.0
-                sample = tiny_img.flatten().reshape(1, -1)  # WICHTIG: reshape!
-                
-                ret, results, neighbours, dist = knn_model.findNearest(sample, k=3)
-                digit = int(results[0][0])
-                
-                grid.append(digit)
-        
+                else:
+                    # Erkennen
+                    small_img = cv2.resize(crop, (20, 20))
+                    sample = small_img.reshape((1, 400)).astype(np.float32)
+                    
+                    ret, results, _, dist = knn.findNearest(sample, k=1)
+                    digit = int(results[0][0])
+                    grid.append(digit)
+
         return jsonify({'status': 'success', 'grid': grid})
 
     except Exception as e:
         print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, threaded=True)
+    app.run(host='0.0.0.0', port=port)
